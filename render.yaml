@@ -1,0 +1,30 @@
+# Render Blueprint — Voz Navega (free tier)
+# One web service, one process (web UI + API + the MCP front door at
+# POST /mcp). The app is STATELESS by design: sessions live in memory
+# (app/store.py) and reset when the host sleeps — the same disclosed
+# choice as Podrá Navega. No disk and no database are defined here,
+# because a free Render Postgres would expire during judging.
+# Nothing to expire = nothing that can die mid-judging.
+#
+# The app reads NO environment variables (verified by grep over
+# app/ and safety/: zero environ/getenv reads). It is deterministic
+# demo mode — /api/health hardcodes demo_mode: true — so unlike
+# Podrá there are NO secret keys to set in the dashboard. The only
+# values below are $PORT (supplied by Render at runtime, consumed by
+# the start command) and PYTHON_VERSION (a Render build-time setting,
+# matching requirements.txt's "Python 3.12" and the dev venv's 3.12.3).
+services:
+  - type: web
+    name: voz-navega
+    env: python
+    plan: free
+    # The GitHub repo's branch is "main" (every push goes there via
+    # the git-data API scripts). A local clone may sit on "master" —
+    # that branch is NOT what Render must build.
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.3"
