@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Voz Navega — Voice Companion (Simulated Alexa+ Experience)</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="demo-banner" role="note">
+  Simulated Alexa+ experience — demo. Fictional patient. Not a medical service.
+</div>
+
+<header class="topbar">
+  <h1>Voz <span class="accent">Navega</span></h1>
+  <p class="tagline">Your voice companion for getting ready to see the doctor.</p>
+</header>
+
+<main class="stage">
+
+  <section class="orb-zone" aria-label="Voice companion">
+    <button type="button" id="orbBtn" class="orb" aria-label="Tap to talk">
+      <span class="orb-ring"></span>
+      <span class="orb-core"></span>
+    </button>
+    <p id="orbHint" class="orb-hint">Tap the orb and speak — or type below.</p>
+    <p id="orbState" class="orb-state">Idle</p>
+  </section>
+
+  <section class="transcript-zone" aria-labelledby="transcriptTitle">
+    <h2 id="transcriptTitle" class="sr-only">Conversation</h2>
+    <div id="transcript" class="transcript" aria-live="polite"></div>
+  </section>
+
+  <form id="textForm" class="text-fallback">
+    <label class="sr-only" for="textInput">Type what you would say</label>
+    <input id="textInput" type="text" autocomplete="off"
+           placeholder="Type what you would say…">
+    <button type="submit" id="sendBtn">Send</button>
+  </form>
+
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

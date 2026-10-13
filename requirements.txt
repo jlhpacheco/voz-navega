@@ -1,0 +1,5 @@
+# Voz Navega — Python dependencies (Python 3.12)
+# Minimum versions only; the deploy installs the newest compatible release.
+fastapi>=0.115
+uvicorn>=0.30
+pydantic>=2.8
