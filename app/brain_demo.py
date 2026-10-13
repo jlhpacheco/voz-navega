@@ -573,6 +573,14 @@ _INTAKE_ASK = {
     "es": "Gracias. ¿Qué le dijo su equipo médico que sigue — por "
           "ejemplo, una biopsia, quimioterapia, cirugía o resultados?",
 }
+# The gentle re-ask for a content-free turn (no real words — see
+# _has_meaningful_content below): the companion stays exactly where
+# she was and asks again what is on the patient's mind.
+_REASK = {
+    "en": "I didn't quite catch that — I'm listening. What's on your "
+          "mind today?",
+    "es": "No le entendí bien — le escucho. ¿Qué le preocupa hoy?",
+}
 _ESCALATED_LINE = {
     "en": "I'm stopping here and sending this straight to a human "
           "navigator.",
@@ -605,6 +613,53 @@ _COST_WORDS = ["pagar", "pay", "cuesta", "cost", "dinero", "money",
                "afford", "cobran"]
 _ENGLISH_MARKERS = [" the ", " i ", " my ", " is ", " and ", " what ",
                     " how ", " you "]
+
+
+# ---------------------------------------------------------------------------
+# Content-free turn guard. A turn with no real words in it — an empty
+# string, stray emoji or punctuation, a number alone, keyboard salad
+# ("asdf", "qwerty") — is not a stated concern: the companion gently
+# re-asks and the machine does not move (no state advance, no
+# barrier/topic recorded, nothing appended verbatim to the question
+# list). The check is deliberately small: a turn carries content if
+# it holds at least one plausible word.
+# ---------------------------------------------------------------------------
+
+_VOWELS = set("aeiouáéíóúü")
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)  # letter runs only
+_SINGLE_LETTER_WORDS = {"i", "a", "y", "o"}  # I / a / y (and) / o (or)
+_KEYBOARD_ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
+
+
+def _is_keyboard_salad(token: str) -> bool:
+    """True for a contiguous run along one keyboard row ('asdf',
+    'qwerty', 'poiuy'), forward or reversed. Only applied to tokens
+    of 4+ letters, so real short words ('sad', 'try') are never
+    eaten by this rule."""
+    if len(token) < 4:
+        return False
+    return any(token in row or token[::-1] in row
+               for row in _KEYBOARD_ROWS)
+
+
+def _is_word(token: str) -> bool:
+    low = token.lower()
+    if len(low) == 1:
+        return low in _SINGLE_LETTER_WORDS
+    # 'y' does vowel work when it is not the first letter
+    # ('try', 'my', 'rhythm').
+    vowels = sum(1 for i, ch in enumerate(low)
+                 if ch in _VOWELS or (ch == "y" and i > 0))
+    if vowels == 0 or vowels == len(low):
+        return False  # consonant salad ('bcdf', 'hmm') or vowel salad
+    if len(set(low)) == 1:
+        return False  # one repeated letter ('aaaa', 'oooo')
+    return not _is_keyboard_salad(low)
+
+
+def _has_meaningful_content(text: str) -> bool:
+    """Does this patient turn carry at least one real word?"""
+    return any(_is_word(tok) for tok in _WORD_RE.findall(text))
 
 
 def new_session(session_id: str | None = None) -> dict:
@@ -679,11 +734,14 @@ def _offer_segment(resources: list[dict], lang: str) -> str:
     return f"{lead} {items} {_OFFER_CHECK['en']}"
 
 
-def _render(session: dict, segments: list[tuple[str, str]]) -> tuple[str, str]:
+def _render(session: dict, segments: list[tuple[str, str]],
+            lang: str | None = None) -> tuple[str, str]:
     """Compose a companion reply from (en, es) segment pairs. Returns
     (text in the session language, English gloss). Building the gloss
-    from the same segments is what guarantees they match (§2.1)."""
-    lang = session["language"] or "en"
+    from the same segments is what guarantees they match (§2.1).
+    ``lang`` overrides the session language — used by the content-free
+    re-ask, which fires before a session language exists."""
+    lang = lang or session["language"] or "en"
     text = " ".join(en if lang == "en" else es for en, es in segments)
     gloss = " ".join(en for en, _ in segments)
     return text, gloss
@@ -693,8 +751,9 @@ def _pair(en_text: str, es_text: str) -> tuple[str, str]:
     return (en_text, es_text)
 
 
-def _finish_turn(session: dict, segments: list[tuple[str, str]]) -> dict:
-    text, gloss = _render(session, segments)
+def _finish_turn(session: dict, segments: list[tuple[str, str]],
+                 lang: str | None = None) -> dict:
+    text, gloss = _render(session, segments, lang)
     session["turns"].append({
         "speaker": "voz",
         "text": text,
@@ -721,7 +780,10 @@ def _finish_turn(session: dict, segments: list[tuple[str, str]]) -> dict:
 
 def greeting_turn(session: dict, ui_language: str = "en") -> dict:
     """Emit the GREETING turn. The greeting follows the UI language; the
-    session language itself is set by the patient's first turn (§1.1)."""
+    session language itself is set by the patient's first turn (§1.1).
+    The UI language is remembered so a content-free first turn can be
+    re-asked in the same language before any session language exists."""
+    session["ui_language"] = ui_language
     text = _GREETING[ui_language]
     gloss = _GREETING_GLOSS_EN if ui_language == "es" else text
     session["turns"].append({
@@ -1024,7 +1086,8 @@ def handle_turn(session: dict, text: str) -> dict:
     session["turns"].append({
         "speaker": "patient", "text": text, "state": session["state"],
     })
-    if session["_first_patient_turn"] is None and text:
+    meaningful = _has_meaningful_content(text)
+    if session["_first_patient_turn"] is None and text and meaningful:
         session["_first_patient_turn"] = text
 
     if session["state"] == "ESCALATED":
@@ -1034,6 +1097,17 @@ def handle_turn(session: dict, text: str) -> dict:
     if session["state"] in ("HANDOFF", "CLOSED"):
         return _finish_turn(session, [
             _pair(_PARKED_LINE["en"], _PARKED_LINE["es"])])
+
+    if not meaningful:
+        # Content-free turn: gently re-ask, and change NOTHING — no
+        # state advance, no language switch, no barrier or topic
+        # recorded, no probe spent, nothing appended to the question
+        # list. (Parked and escalated sessions returned above keep
+        # their fixed lines; they never advance either.)
+        lang = (session["language"] or session.get("ui_language")
+                or "en")
+        return _finish_turn(session, [
+            _pair(_REASK["en"], _REASK["es"])], lang=lang)
 
     _update_language(session, text)
     new_barriers = _merge_barriers(session, text)

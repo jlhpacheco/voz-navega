@@ -5,7 +5,9 @@ fictional patient talks (browser speech), and the companion answers
 out loud and in the transcript. This module is the HTTP surface and
 the server-side gate enforcement (ARCHITECTURE.md §2.2, §3.3);
 content and turn decisions live in app/brain_demo.py, storage in
-app/store.py.
+app/store.py, and the turn flow itself in app/flow.py — the ONE
+door into the engine, shared with the MCP front door mounted at
+/mcp (app/mcp_server.py, MCP spec 2025-11-25 over Streamable HTTP).
 
 THE FLOW, on every patient turn, in this order:
   1. safety.gate.evaluate_turn classifies the raw turn
@@ -30,6 +32,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
@@ -41,39 +44,43 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from safety.gate import evaluate_turn  # noqa: E402
-
 from . import brain_demo as brain  # noqa: E402
-from .store import SessionStore  # noqa: E402
+from . import flow  # noqa: E402
+from .flow import run_patient_turn as _run_patient_turn  # noqa: E402
+from .flow import store  # noqa: E402
+from .mcp_server import build_mcp_http_app, mcp  # noqa: E402
 
 DEFAULT_NAVIGATOR = "Human navigator (demo)"
+
+# The MCP front door's ASGI app (Streamable HTTP). Built before the
+# FastAPI app because the app's lifespan must run its session
+# manager (below).
+_mcp_http_app = build_mcp_http_app()
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # A mounted sub-app's own lifespan is not run by the parent, so
+    # the parent runs the MCP session manager for the whole process:
+    # without this, /mcp raises "Task group is not initialized".
+    async with mcp.session_manager.run():
+        yield
+
 
 app = FastAPI(
     title="Voz Navega",
     description="Voice-first companion that helps a fictional patient "
                 "prepare for a doctor visit. Simulated Alexa+ experience "
                 "in a web app. Demo only — not a medical service.",
-    version="0.2.0",
+    version="0.3.0",
+    lifespan=_lifespan,
 )
 
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
-store = SessionStore()
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _safety_view(outcome: dict) -> dict:
-    raw = outcome.get("safety") or {}
-    return {
-        "category": outcome.get("category") or raw.get("category"),
-        "escalate": bool(outcome.get("escalate")),
-        "reason": raw.get("reason", ""),
-        "rule": outcome.get("rule", raw.get("rule")),
-        "source": "safety.gate",
-    }
 
 
 def _session_view(session: dict) -> dict:
@@ -98,90 +105,6 @@ def _queue_entry(session: dict) -> dict:
         "turns_count": len(session.get("turns", [])),
         "fictional": True,
     }
-
-
-def _turn_response(session: dict, result: dict, safety_view: dict) -> dict:
-    return {
-        "session_id": session["id"],
-        "reply": result["text"],
-        "companion_turn": {
-            "speaker": "voz",
-            "text": result["text"],
-            "gloss": result["gloss"],
-            "spoken": result["spoken"],
-        },
-        "state": result["state"],
-        "state_history": result["state_history"],
-        "slots": result["slots"],
-        "barriers_found": result["barriers_found"],
-        "question_list": result["question_list"],
-        "resources": result["resources"],
-        "summary": result["summary"],
-        "draft": result["summary"],
-        "approval_status": result["approval_status"],
-        "banner": result["banner"],
-        "handoff": None,
-        "safety": safety_view,
-    }
-
-
-def _run_patient_turn(session: dict, text: str) -> dict:
-    """One patient turn through the real flow: the safety gate FIRST,
-    then the brain. Mutates the passed session copy; the caller writes
-    it back to the store."""
-    state_before = session.get("state")
-    outcome = evaluate_turn(session, text)
-    safety_view = _safety_view(outcome)
-
-    if not outcome["allowed"]:
-        # Escalated: the gate composed nothing. Record the patient's
-        # words and the fixed line so the navigator sees the trigger,
-        # and void any pending approval — an escalated case is never
-        # offered for approval (§1.2, §3.3).
-        session["turns"].append({
-            "speaker": "patient", "text": text, "state": state_before})
-        session["turns"].append({
-            "speaker": "voz",
-            "text": outcome["companion_turn"],
-            "gloss": (outcome["companion_turn_gloss"]
-                      or outcome["companion_turn"]),
-            "state": "ESCALATED",
-        })
-        if session.get("approval_status") == "PENDING_APPROVAL":
-            session["approval_status"] = None
-        return {
-            "session_id": session["id"],
-            "reply": outcome["companion_turn"],
-            "companion_turn": {
-                "speaker": "voz",
-                "text": outcome["companion_turn"],
-                "gloss": outcome["companion_turn_gloss"],
-                "spoken": outcome["companion_turn"],
-            },
-            "state": "ESCALATED",
-            "state_history": list(session.get("state_history", [])),
-            "slots": dict(session.get("slots") or {}),
-            "barriers_found": [dict(b) for b in
-                               session.get("barriers_found", [])],
-            "question_list": session.get("question_list"),
-            "resources": [dict(r) for r in session.get("resources", [])],
-            "summary": None,
-            "draft": None,
-            "approval_status": session.get("approval_status"),
-            "banner": outcome["banner"],
-            "handoff": outcome["handoff"],
-            "safety": safety_view,
-        }
-
-    if session.get("state") == "APPROVED_SENT":
-        # A human approved; the companion may now deliver its closing
-        # turn — exactly once, then the session is CLOSED (§1.2).
-        session["turns"].append({
-            "speaker": "patient", "text": text, "state": state_before})
-        result = brain.closing_turn(session)
-    else:
-        result = brain.handle_turn(session, text)
-    return _turn_response(session, result, safety_view)
 
 
 # ---------------------------------------------------------------------------
@@ -243,11 +166,7 @@ class TurnIn(BaseModel):
 
 
 def _create_session(ui_language: str) -> dict:
-    language = "es" if (ui_language or "en").lower().startswith("es") else "en"
-    session = brain.new_session(store.next_id())
-    result = brain.greeting_turn(session, language)
-    store.create(session)
-    return session, result
+    return flow.start_session(ui_language)
 
 
 @app.post("/api/sessions", status_code=201)
@@ -453,6 +372,12 @@ def approve(session_id: str, payload: ApproveIn | None = None) -> dict:
         "session": _session_view(session),
     }
 
+
+# The MCP front door (MCP spec 2025-11-25, Streamable HTTP). The
+# sub-app carries its own /mcp route and is mounted at the root,
+# before the static catch-all so /mcp wins over / — see
+# build_mcp_http_app for why it is not mounted AT /mcp.
+app.mount("", _mcp_http_app, name="mcp")
 
 # Serve the single-page frontend at / (mounted last so /api/* wins).
 app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")
