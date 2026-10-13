@@ -36,6 +36,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -373,11 +374,49 @@ def approve(session_id: str, payload: ApproveIn | None = None) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# The single-page frontend (app/static/). Its three files are served
+# by the explicit routes below, registered BEFORE the mounts: the
+# MCP sub-app is mounted at the root (next block) and a root mount
+# matches every path, so the StaticFiles catch-all at the bottom is
+# unreachable for any path the MCP app does not own — left to the
+# mount alone, GET / 404s (the f48c0cc screen worked before the MCP
+# wave precisely because the static mount was then the only
+# catch-all). index.html references style.css and app.js relatively,
+# so they must live at exactly /style.css and /app.js.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/", include_in_schema=False)
+def _index() -> FileResponse:
+    return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
+
+
+@app.get("/index.html", include_in_schema=False)
+def _index_html() -> FileResponse:
+    return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
+
+
+@app.get("/style.css", include_in_schema=False)
+def _style_css() -> FileResponse:
+    return FileResponse(os.path.join(_STATIC_DIR, "style.css"),
+                        media_type="text/css")
+
+
+@app.get("/app.js", include_in_schema=False)
+def _app_js() -> FileResponse:
+    return FileResponse(os.path.join(_STATIC_DIR, "app.js"),
+                        media_type="text/javascript")
+
+
 # The MCP front door (MCP spec 2025-11-25, Streamable HTTP). The
 # sub-app carries its own /mcp route and is mounted at the root,
 # before the static catch-all so /mcp wins over / — see
 # build_mcp_http_app for why it is not mounted AT /mcp.
 app.mount("", _mcp_http_app, name="mcp")
 
-# Serve the single-page frontend at / (mounted last so /api/* wins).
+# Static catch-all (mounted last so /api/* wins). Kept as the
+# backstop for any future file dropped into app/static/ under a
+# path the MCP app passes on; the frontend's own files are served
+# by the explicit routes above.
 app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")
